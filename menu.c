@@ -1113,6 +1113,9 @@ void HandleUI(void)
 	int firstline = osdlines <= 8 ? 0 : 2;
 	uint8_t keys[6] = {0,0,0,0,0,0};
 
+	// the clock of the ZXTRES theme status bar
+	OsdThemeTick();
+
 	// get user control codes
 	c = OsdGetCtrl();
 
@@ -1812,6 +1815,41 @@ void HandleUI(void)
 }
 
 
+// The date column of the file selector in the theme, as MiSTer shows it: the
+// date is not the one of the file but the one in its name, the digits after
+// the last "_" ("Core_20261025" or "Core_261025", shown as 26.10.25), which
+// is then left out of the name (*len is shortened). A file without it gets
+// "--.--.--". Directories show <DIR>, and ".." <UP-DIR>. len is the length
+// of the name to show (extension already removed). 8 characters; buf has
+// room for 9.
+static const char *FileDateText(const FILINFO *f, int *len, char *buf)
+{
+	const char *n = f->fname;
+	int l = *len, pos, digits, k;
+
+	if (n[0] == '.' && n[1] == '.' && !n[2]) return "<UP-DIR>";
+	if (f->fattrib & AM_DIR) return "   <DIR>";
+
+	for (pos = l - 1; pos > 0 && n[pos] != '_'; pos--);
+	digits = l - pos - 1;
+	if (pos > 0 && (digits == 6 || digits == 8)) {
+		const char *d = n + pos + 1 + digits - 6; // yymmdd, the last six digits
+		for (k = 0; k < digits && n[pos + 1 + k] >= '0' && n[pos + 1 + k] <= '9'; k++);
+		if (k == digits) {
+			int m = (d[2] - '0') * 10 + (d[3] - '0');
+			int day = (d[4] - '0') * 10 + (d[5] - '0');
+			if (m >= 1 && m <= 12 && day >= 1 && day <= 31) {
+				buf[0] = d[0]; buf[1] = d[1]; buf[2] = '.';
+				buf[3] = d[2]; buf[4] = d[3]; buf[5] = '.';
+				buf[6] = d[4]; buf[7] = d[5]; buf[8] = 0;
+				*len = pos;
+				return buf;
+			}
+		}
+	}
+	return "--.--.--";
+}
+
 static void ScrollLongName(void)
 {
 	// this function is called periodically when file selection window is displayed
@@ -1829,6 +1867,15 @@ static void ScrollLongName(void)
 		if((len > 4) && !fs_ShowExt)
 			if (DirEntries[k].fname[len - 4] == '.')
 				len -= 4; // remove extension
+
+		if (OsdTheme()) {
+			// the theme: the name scrolls in its column, the date stays
+			char date[9];
+			int name_len = len;
+			const char *d = FileDateText(&DirEntries[k], &name_len, date);
+			OsdScrollFileName(iSelectedEntry, DirEntries[k].fname, name_len, d, 2);
+			return;
+		}
 
 		max_len = 30; // number of file name characters to display (one more required for scrolling)
 		if (DirEntries[k].fattrib & AM_DIR)
@@ -1944,6 +1991,18 @@ static void PrintDirectory(void)
                    memcpy(DirEntryInfo[i], info, 5); // copy disk number info if present
             }
 
+            if (OsdTheme())
+            { // the theme: the name in 20 columns, the date at the right
+                char date[9];
+                int name_len = len;
+                const char *d = FileDateText(&DirEntries[k], &name_len, date);
+                if (name_len > 20)
+                    name_len = 20;
+                memcpy(s + 1, lfn, name_len);
+                memcpy(s + 22, d, 8);
+            }
+            else
+            {
             if (len > 30)
                 len = 30; // trim display length if longer than 30 characters
 
@@ -1957,6 +2016,7 @@ static void PrintDirectory(void)
 
             if (DirEntries[k].fattrib & AM_DIR) // mark directory with suffix
                 strcpy(&s[22], " <DIR>");
+            }
         }
         else
         {
@@ -1964,6 +2024,8 @@ static void PrintDirectory(void)
                 strcpy(s, "          No files!");
         }
 
+        if (i < nDirEntries && (DirEntries[sort_table[i]].fattrib & AM_DIR))
+            OsdSetNextKind(1); // a directory, blue in the ZX Spectrum theme
         OsdWrite(i, s, i == iSelectedEntry,0); // display formatted line text
     }
 }

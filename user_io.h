@@ -105,6 +105,7 @@
 #define FEAT_BIGOSD     0x2000 // 16 line tall OSD
 #define FEAT_HDMI       0x4000 // HDMI output
 #define FEAT_PSX        0x8000 // PSX-specific CD image handling
+#define FEAT_ZXTHEME    0x80000000 // ZX Spectrum OSD theme (ZXTRES menu core)
 
 #define JOY_RIGHT       0x01
 #define JOY_LEFT        0x02

@@ -43,7 +43,130 @@ This is the Minimig OSD (on-screen-display) handler.
 #include "state.h"
 #include "user_io.h"
 
+#ifdef XILINX
+#include "drivers/fpga.h"
+#include "drivers/bitfile.h"
+#endif
+
 extern unsigned char charfont[128][8];
+
+// ZX Spectrum theme of the ZXTRES menu core (mist-ports menu/zxtres/osd_zx.v).
+// A core that announces FEAT_ZXTHEME draws the OSD opaque in Spectrum
+// colours, with a title bar and a status bar around the text lines; the
+// firmware then sends, besides the usual line bitmaps:
+//   C0h/C1h theme off/on, Anh+attr the kind of text line n (0 normal,
+//   1 directory, 2 selected), B0h/B1h+256 bytes the title and status bars.
+// The text lines lose the vertical title at their left, and the selected
+// line is sent as it is, not inverted: its kind makes it cyan.
+#define OSD_CMD_THEME   0xC0
+#define OSD_CMD_ATTR    0xA0
+#define OSD_CMD_BAR     0xB0
+
+#define OSD_KIND_NORMAL   0
+#define OSD_KIND_DIR      1
+#define OSD_KIND_SELECTED 2
+
+// the file selector of the theme (OsdFileLine)
+#define OSD_FILE_NAME_COLS 20   // characters of the name column
+#define OSD_FILE_BLANKS    10   // blanks between the end of a scrolling name and its repeat
+
+static unsigned char zx_theme = 0;
+static unsigned char zx_next_kind = OSD_KIND_NORMAL;
+
+static void OsdThemeCheck(void)
+{
+  zx_theme = (user_io_core_type() == CORE_TYPE_8BIT) &&
+             (user_io_get_core_features() & FEAT_ZXTHEME) ? 1 : 0;
+  // sent every time: a newly loaded core starts with the theme off
+  if (zx_theme) spi_osd_cmd(OSD_CMD_THEME | 1);
+}
+
+unsigned char OsdTheme(void)
+{
+  return zx_theme;
+}
+
+void OsdSetNextKind(unsigned char kind)
+{
+  zx_next_kind = kind;
+}
+
+// The board, as the title of the theme: ZXTres, ZXTres+ or ZXTres++ after
+// the FPGA (A35T, A100T, A200T).
+static const char *OsdBoardName(void)
+{
+#ifdef XILINX
+  switch (fpga_GetType()) {
+    case A100T: return "ZXTres+";
+    case A200T: return "ZXTres++";
+    default:    return "ZXTres";
+  }
+#else
+  return "MiST";
+#endif
+}
+
+// a bar of the theme: 8 blank columns, 30 characters, 8 blank columns
+static void OsdBar(unsigned char bar, const char *text)
+{
+  spi_osd_cmd_cont(OSD_CMD_BAR | bar);
+  spi_n(0x00, 8);
+  for (int i = 0; i < 30; i++) {
+    unsigned char c = *text ? *text++ : ' ';
+    const unsigned char *p = &charfont[c & 0x7f][0];
+    for (int b = 0; b < 8; b++) spi8(*p++);
+  }
+  spi_n(0x00, 8);
+  DisableOsd();
+}
+
+// The status bar of the theme: the page title at the left, the date and
+// time of the board RTC at the right ("dd/mm/yy hh:mm:ss"), refreshed every
+// second while the OSD is shown. A clock never set (before 2024, as the
+// RP2040 starts when the board RTC could not be read) is not shown.
+char GetRTC(unsigned char *d);   // [year-1900] [month] [day] [h] [m] [s] [weekday]
+
+static char zx_status[32];
+static unsigned char zx_osd_on = 0;
+static signed char zx_clock_sec = -1;
+
+static void OsdTwoDigits(char *p, unsigned char n)
+{
+  p[0] = '0' + (n / 10) % 10;
+  p[1] = '0' + n % 10;
+}
+
+static void OsdStatusBar(void)
+{
+  unsigned char d[7];
+  char bar[31];
+  int n = strlen(zx_status);
+
+  memset(bar, ' ', 30);
+  bar[30] = 0;
+  memcpy(bar, zx_status, n > 30 ? 30 : n);
+  zx_clock_sec = -1;
+  if (GetRTC(d) && d[0] >= 124 && n <= 11) {
+    char *t = &bar[12];
+    OsdTwoDigits(t + 0, d[2]);  t[2] = '/';
+    OsdTwoDigits(t + 3, d[1]);  t[5] = '/';
+    OsdTwoDigits(t + 6, d[0]);
+    OsdTwoDigits(t + 9, d[3]);  t[11] = ':';
+    OsdTwoDigits(t + 12, d[4]); t[14] = ':';
+    OsdTwoDigits(t + 15, d[5]);
+    zx_clock_sec = d[5];
+  }
+  OsdBar(1, bar);
+}
+
+// called from the menu loop: redraws the status bar when the second changes
+void OsdThemeTick(void)
+{
+  unsigned char d[7];
+
+  if (!zx_theme || !zx_osd_on || zx_clock_sec < 0) return;
+  if (GetRTC(d) && d[5] != zx_clock_sec) OsdStatusBar();
+}
 
 // conversion table of Amiga keyboard scan codes to ASCII codes
 const char keycode_table[128] =
@@ -148,6 +271,20 @@ static void rotatechar(unsigned char *in,unsigned char *out)
 
 void OsdSetTitle(char *s,int a)
 {
+	// the theme: the board in the title bar, the page in the status bar
+	OsdThemeCheck();
+	if (zx_theme) {
+		char bar[32];
+		bar[0] = ' ';
+		strncpy(bar + 1, OsdBoardName(), sizeof(bar) - 2);
+		bar[sizeof(bar) - 1] = 0;
+		OsdBar(0, bar);
+		zx_status[0] = ' ';
+		strncpy(zx_status + 1, s ? s : "", sizeof(zx_status) - 2);
+		zx_status[sizeof(zx_status) - 1] = 0;
+		OsdStatusBar();
+	}
+
 	// Compose the title, condensing character gaps
 	arrow=a;
 	char zeros=0;
@@ -274,12 +411,18 @@ void OsdDrawLogo(unsigned char n, char row,char superimpose) {
 
     while (bytes) {
       if(i==0) {	// Render sidestripe
+        if (zx_theme) {
+          // no vertical title: the logo (227 columns) centred in the line
+          spi_n(0x00, 14);
+          i += 14;
+        } else {
         p = &titlebuffer[(OsdLines()-1-n)*8];
         spi16(0xffff);
         for(j=0;j<8;j++) spi_n(255^*p++, 2);
         spi16(0xffff);
         spi16(0x0000);
         i += 22;
+        }
       }
       if(i>=linelimit) 
         break;
@@ -296,12 +439,17 @@ void OsdDrawLogo(unsigned char n, char row,char superimpose) {
     while (bytes) {
       if(i==0) { // Render sidestripe
         unsigned char b;
+        if (zx_theme) {
+          spi_n(0x00, 14);
+          i += 14;
+        } else {
         p = &titlebuffer[(OsdLines()-1-n)*8];
         spi16(0xffff);
         for(b=0;b<8;b++) spi_n(255^*p++, 2);
         spi16(0xffff);
         spi16(0x0000);
         i += 22;
+        }
       }
       if(i>=linelimit)
         break;
@@ -317,6 +465,14 @@ void OsdDrawLogo(unsigned char n, char row,char superimpose) {
   }
   // deselect OSD SPI device
   DisableOsd();
+
+  // the theme keeps the kind of a line until it is told another: a logo line
+  // must not inherit the cyan of the item that was selected before
+  if (zx_theme) {
+    spi_osd_cmd_cont(OSD_CMD_ATTR | n);
+    spi8(OSD_KIND_NORMAL);
+    DisableOsd();
+  }
 }
 
 
@@ -347,32 +503,46 @@ void OsdPrintText(unsigned char line, char *text, unsigned long start, unsigned 
   } else
     stipple=0;
 
+  // the theme: the kind of the line instead of inverted text
+  unsigned char kind = invert ? OSD_KIND_SELECTED : zx_next_kind;
+  zx_next_kind = OSD_KIND_NORMAL;
+  if (zx_theme)
+    invert = 0;
+
   // select buffer and line to write to
   if(!minimig_v2())
     spi_osd_cmd_cont(MM1_OSDCMDWRITE | line);
-  else 
+  else
     spi_osd_cmd32_cont(OSD_CMD_OSD_WR, line);
 
   if(invert)
     invert=0xff;
 
-  p = &titlebuffer[(OsdLines()-1-line)*8];
-  if(start>2) {
-    spi16(0xffff);
-    start-=2;
-  }
+  if (zx_theme) {
+    // no vertical title: a margin of 8 columns, the text gets the rest
+    unsigned long lead = start < 8 ? start : 8;
+    width += start - lead;
+    spi_n(0x00, lead);
+    start = 0;
+  } else {
+    p = &titlebuffer[(OsdLines()-1-line)*8];
+    if(start>2) {
+      spi16(0xffff);
+      start-=2;
+    }
 
-  i=start>16 ? 16 : start;
-  for(j=0;j<(i/2);++j)
-    spi_n(255^*p++, 2);
+    i=start>16 ? 16 : start;
+    for(j=0;j<(i/2);++j)
+      spi_n(255^*p++, 2);
 
-  if(i&1)
-    spi8(255^*p);
-  start-=i;
+    if(i&1)
+      spi8(255^*p);
+    start-=i;
 
-  if(start>2) {
-    spi16(0xffff);
-    start-=2;
+    if(start>2) {
+      spi16(0xffff);
+      start-=2;
+    }
   }
 
   while (start--)
@@ -408,6 +578,12 @@ void OsdPrintText(unsigned char line, char *text, unsigned long start, unsigned 
   }
 
   DisableOsd();
+
+  if (zx_theme) {
+    spi_osd_cmd_cont(OSD_CMD_ATTR | line);
+    spi8(kind);
+    DisableOsd();
+  }
 }
 
 // clear OSD frame buffer
@@ -429,6 +605,8 @@ void OsdClear(void)
 // enable displaying of OSD
 void OsdEnable(unsigned char mode)
 {
+  OsdThemeCheck();
+  zx_osd_on = 1;
   user_io_osd_key_enable(mode & DISABLE_KEYBOARD);
 
   if(!minimig_v2())
@@ -440,6 +618,7 @@ void OsdEnable(unsigned char mode)
 // disable displaying of OSD
 void OsdDisable(void)
 {
+    zx_osd_on = 0;
     user_io_osd_key_enable(0);
 
     if(!minimig_v2()) 
@@ -667,6 +846,67 @@ void ScrollReset()
 {
     scroll_timer = GetTimer(SCROLL_DELAY); // set timer to start name scrolling after predefined time delay
     scroll_offset = 0; // start scrolling from the start
+}
+
+// A line of the file selector in the theme, laid out as MiSTer does: a
+// margin column, the name in OSD_FILE_NAME_COLS columns, a gap column and the
+// date (8 characters) at the right. The name is shown from pixel <px> of a
+// cycle of the name, some blanks and the name again, which scrolls it to the
+// left; 0 shows its start. The line is 256 columns: 8 blank, 8 margin, the
+// name, 8 gap, the date, 8 blank.
+static unsigned char OsdFileChar(const char *name, int len, unsigned long cell)
+{
+  unsigned long pos = cell % (unsigned long)(len + OSD_FILE_BLANKS);
+  return pos < (unsigned long)len ? (unsigned char)name[pos] : ' ';
+}
+
+void OsdFileLine(unsigned char n, const char *name, int len, unsigned long px,
+                 const char *date, unsigned char kind)
+{
+  if (!minimig_v2())
+    spi_osd_cmd_cont(MM1_OSDCMDWRITE | n);
+  else
+    spi_osd_cmd32_cont(OSD_CMD_OSD_WR, n);
+
+  spi_n(0x00, 16);
+  if (len <= OSD_FILE_NAME_COLS) {
+    for (int c = 0; c < OSD_FILE_NAME_COLS; c++) {
+      const unsigned char *p = &charfont[c < len ? name[c] & 0x7f : ' '][0];
+      for (int b = 0; b < 8; b++) spi8(*p++);
+    }
+  } else {
+    unsigned long cell = px >> 3;
+    unsigned char col = px & 7;
+    for (int x = 0; x < OSD_FILE_NAME_COLS * 8; x++) {
+      spi8(charfont[OsdFileChar(name, len, cell) & 0x7f][col]);
+      if (++col == 8) { col = 0; cell++; }
+    }
+  }
+  spi_n(0x00, 8);
+  for (int c = 0; c < 8; c++) {
+    const unsigned char *p = &charfont[date[c] & 0x7f][0];
+    for (int b = 0; b < 8; b++) spi8(*p++);
+  }
+  spi_n(0x00, 8);
+  DisableOsd();
+
+  spi_osd_cmd_cont(OSD_CMD_ATTR | n);
+  spi8(kind);
+  DisableOsd();
+}
+
+// called periodically while a long name is selected: scrolls it by one pixel
+// when the timer says so
+void OsdScrollFileName(unsigned char n, const char *name, int len,
+                       const char *date, unsigned char kind)
+{
+  if (!zx_theme || len <= OSD_FILE_NAME_COLS) return;
+  if (CheckTimer(scroll_timer)) {
+    scroll_timer = GetTimer(SCROLL_DELAY2);
+    if (++scroll_offset >= (unsigned long)(len + OSD_FILE_BLANKS) << 3)
+      scroll_offset = 0;
+    OsdFileLine(n, name, len, scroll_offset, date, kind);
+  }
 }
 
 /* the Atari core handles OSD keys competely inside the core */

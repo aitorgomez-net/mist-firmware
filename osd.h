@@ -130,6 +130,13 @@ void OsdWriteDoubleSize(unsigned char n, char *s, unsigned char pass);
 //void OsdDrawLogo(unsigned char n, char row);
 void OsdDrawLogo(unsigned char n, char row,char superimpose);
 void ScrollText(char n, const char *str, int len, int max_len, unsigned char invert, int len_offset);
+// ZX Spectrum theme of the ZXTRES menu core (FEAT_ZXTHEME), see osd.c
+unsigned char OsdTheme(void);
+void OsdSetNextKind(unsigned char kind);  // 1: the next line written is a directory
+void OsdThemeTick(void);  // the clock of the status bar, from the menu loop
+// file selector line of the theme: name from pixel px of its scroll cycle, date (8 characters), kind of line
+void OsdFileLine(unsigned char n, const char *name, int len, unsigned long px, const char *date, unsigned char kind);
+void OsdScrollFileName(unsigned char n, const char *name, int len, const char *date, unsigned char kind);
 void ScrollReset();
 void StarsInit();
 void StarsUpdate();
